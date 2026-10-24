@@ -379,7 +379,7 @@ async def generate_response(request: Request, path: str) -> Response:
                         logger.info("inference_started id=%s queue_ms=%.1f", request_id, queue_duration_ms)
                         upstream = await request.app.state.client.post(
                             API_URL,
-                            headers={"Authorization": API_KEY},
+                            headers={"Authorization": f"Bearer {API_KEY}"},
                             json={
                                 "model": MODEL,
                                 "temperature": 0.2,
