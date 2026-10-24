@@ -10,4 +10,7 @@ services:
       OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://api.openai.com/v1}
       MAX_BODY_BYTES: ${MAX_BODY_BYTES:-1048576}
       MAX_CONCURRENT_INFERENCES: ${MAX_CONCURRENT_INFERENCES:-4}
+      HTTP_ARCHIVE_PATH: /data/http-archive.jsonl
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    volumes:
+      - ./http-archive:/data

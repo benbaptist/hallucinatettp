@@ -1,5 +1,12 @@
 import asyncio
+import base64
+import json
+import os
+import logging
+import re
 import threading
+
+import httpx
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
@@ -9,25 +16,35 @@ import app as server
 
 
 class FakeResponse:
-    def __init__(self, content):
+    def __init__(self, content, usage=None):
         self.content = content
+        self.usage = usage or {"prompt_tokens": 12, "completion_tokens": 7}
 
     def raise_for_status(self):
         return None
 
     def json(self):
-        return {"choices": [{"message": {"content": self.content}}]}
+        result = {"choices": [{"message": {"content": self.content}}], "usage": self.usage}
+        return result
 
 
 class FakeClient:
     def __init__(self, content):
         self.content = content
         self.request = None
+        self.event_hooks = {
+            "request": [server.archive_upstream_request],
+            "response": [server.archive_upstream_response],
+        }
         self.active = 0
         self.max_active = 0
         self.lock = threading.Lock()
+        self.usage = {"prompt_tokens": 12, "completion_tokens": 7}
 
     async def post(self, url, **kwargs):
+        request = httpx.Request("POST", url, headers=kwargs["headers"], json=kwargs["json"])
+        for hook in self.event_hooks["request"]:
+            await hook(request)
         self.request = (url, kwargs)
         with self.lock:
             self.active += 1
@@ -35,20 +52,30 @@ class FakeClient:
         await asyncio.sleep(0.02)
         with self.lock:
             self.active -= 1
-        return FakeResponse(self.content)
+        result = FakeResponse(self.content, self.usage)
+        upstream_response = httpx.Response(
+            200,
+            request=request,
+            json={"choices": [{"message": {"content": self.content}}], "usage": self.usage},
+        )
+        for hook in self.event_hooks["response"]:
+            await hook(upstream_response)
+        return result
 
     async def aclose(self):
         return None
 
 
 @pytest.fixture
-def client(monkeypatch):
+def client(monkeypatch, tmp_path):
     monkeypatch.setattr(server, "API_KEY", "test-key")
+    monkeypatch.setattr(server, "HTTP_ARCHIVE_PATH", tmp_path / "http-archive.jsonl")
     with TestClient(server.app) as test_client:
         yield test_client
 
 
-def test_raw_request_is_sent_and_model_response_returned(client):
+def test_raw_request_is_sent_and_model_response_returned(client, caplog):
+    caplog.set_level(logging.INFO, logger="hallucinatettp")
     fake = FakeClient("Status: 201 Created\nContent-Type: text/plain\nX-Test: yes\n\ncreated")
     client.app.state.client = fake
     response = client.post("/items?q=one", content=b"payload", headers={"X-Input": "value"})
@@ -56,35 +83,90 @@ def test_raw_request_is_sent_and_model_response_returned(client):
     assert response.text == "created"
     assert response.headers["x-test"] == "yes"
     sent = fake.request[1]["json"]["messages"][1]["content"]
-    assert sent.startswith("POST /items?q=one HTTP/")
+    assert sent.startswith("POST /?q=one HTTP/")
+    assert "host: items" in sent
     assert "x-input: value" in sent
     assert sent.endswith("base64:cGF5bG9hZA==")
+    assert 'input_tokens=12' in caplog.text
+    assert 'output_tokens=7' in caplog.text
+    assert 'input_tokens_per_sec=' in caplog.text
+    assert 'output_tokens_per_sec=' in caplog.text
+    assert 'input_tokens_total=12' in caplog.text
+    assert 'output_tokens_total=7' in caplog.text
+
+    response = client.post("/items", content=b"again")
+    assert response.status_code == 201
+    assert "input_tokens_total=24" in caplog.text
+    assert "output_tokens_total=14" in caplog.text
 
 
-def test_base_url_headers_are_omitted_for_paths_but_kept_at_root(client):
+def test_http_archive_saves_incoming_outgoing_and_upstream_messages(client):
+    client.app.state.client = FakeClient("Content-Type: text/plain\nX-Result: ok\n\nreply")
+    response = client.post("/archive.test?x=1", content=b"request\x00data", headers={"X-Test": "input"})
+    assert response.status_code == 200
+
+    records = [json.loads(line) for line in server.HTTP_ARCHIVE_PATH.read_text().splitlines()]
+    assert [record["direction"] for record in records] == [
+        "upstream_request",
+        "upstream_response",
+        "incoming_request",
+        "outgoing_response",
+    ]
+    incoming, outgoing = records[2:]
+    assert incoming["method"] == "POST"
+    assert incoming["target"] == "/archive.test?x=1"
+    assert base64.b64decode(incoming["body_base64"]) == b"request\x00data"
+    assert outgoing["status_code"] == 200
+    assert base64.b64decode(outgoing["body_base64"]) == b"reply"
+    assert all(record["request_id"] == incoming["request_id"] for record in records)
+    assert os.stat(server.HTTP_ARCHIVE_PATH).st_mode & 0o777 == 0o600
+
+
+def test_path_prefix_is_host_and_headers_are_simulated(client):
     fake = FakeClient("Content-Type: text/plain\n\nok")
     client.app.state.client = fake
     headers = {
         "Host": "hallucinatettp.benbaptist.com",
         "Origin": "https://hallucinatettp.benbaptist.com",
         "Referer": "https://hallucinatettp.benbaptist.com/",
+        "Forwarded": "host=hallucinatettp.benbaptist.com;proto=https",
         "X-Forwarded-Host": "hallucinatettp.benbaptist.com",
+        "X-Forwarded-Proto": "https",
+        "X-Original-Host": "hallucinatettp.benbaptist.com",
         "X-Input": "preserved",
     }
 
-    client.get("/cnn.com", headers=headers)
-    path_request = fake.request[1]["json"]["messages"][1]["content"].lower()
-    assert "get /cnn.com http/" in path_request
-    assert "hallucinatettp.benbaptist.com" not in path_request
-    assert "x-input: preserved" in path_request
+    client.get("/benbaptist.com/account?tab=posts", headers=headers)
+    sent = fake.request[1]["json"]["messages"][1]["content"].lower()
+    assert sent.startswith("get /account?tab=posts http/")
+    assert "host: benbaptist.com" in sent
+    assert "origin: https://benbaptist.com" in sent
+    assert "referer: https://benbaptist.com/account?tab=posts" in sent
+    assert "forwarded: host=benbaptist.com;proto=https" in sent
+    assert "x-forwarded-host: benbaptist.com" in sent
+    assert "x-forwarded-proto: https" in sent
+    assert "x-original-host: benbaptist.com" in sent
+    assert "x-input: preserved" in sent
+    assert "hallucinatettp.benbaptist.com" not in sent
 
     client.get("/", headers=headers)
     root_request = fake.request[1]["json"]["messages"][1]["content"].lower()
     assert "get / http/" in root_request
     assert "host: hallucinatettp.benbaptist.com" in root_request
-    assert "origin: https://hallucinatettp.benbaptist.com" in root_request
-    assert "referer: https://hallucinatettp.benbaptist.com/" in root_request
-    assert "x-forwarded-host: hallucinatettp.benbaptist.com" in root_request
+
+
+def test_path_prefix_with_no_path_maps_to_origin_root(client):
+    client.app.state.client = FakeClient("Content-Type: text/plain\n\nok")
+    client.get("/cnn.com")
+    sent = client.app.state.client.request[1]["json"]["messages"][1]["content"].lower()
+    assert sent.startswith("get / http/")
+    assert "host: cnn.com" in sent
+
+
+@pytest.mark.parametrize("path", ["/bad_host/path", "/host:0/path", "/host:65536/path"])
+def test_invalid_destination_host_is_bad_request(client, path):
+    response = client.get(path)
+    assert response.status_code == 400
 
 
 def test_missing_key_returns_service_unavailable(client, monkeypatch):
