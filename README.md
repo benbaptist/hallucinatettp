@@ -1,4 +1,4 @@
-# hallucinatettp
+# HallucinateTTP
 
 A tiny HTTP server that forwards each raw incoming request to an OpenAI-compatible chat-completions API and turns the model's JSON response into an HTTP response.
 
