@@ -1,4 +1,7 @@
+import asyncio
 import json
+import threading
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 from fastapi.testclient import TestClient
@@ -21,9 +24,18 @@ class FakeClient:
     def __init__(self, content):
         self.content = content
         self.request = None
+        self.active = 0
+        self.max_active = 0
+        self.lock = threading.Lock()
 
     async def post(self, url, **kwargs):
         self.request = (url, kwargs)
+        with self.lock:
+            self.active += 1
+            self.max_active = max(self.max_active, self.active)
+        await asyncio.sleep(0.02)
+        with self.lock:
+            self.active -= 1
         return FakeResponse(self.content)
 
     async def aclose(self):
@@ -60,6 +72,22 @@ def test_malformed_model_output_returns_bad_gateway(client):
     client.app.state.client = FakeClient("not json")
     response = client.get("/hello")
     assert response.status_code == 502
+
+
+def test_concurrent_inference_limit(client, monkeypatch):
+    monkeypatch.setattr(server, "MAX_CONCURRENT_INFERENCES", 2)
+    client.app.state.inference_semaphore = asyncio.Semaphore(2)
+    fake = FakeClient('{"status":200,"headers":{},"body":"ok"}')
+    client.app.state.client = fake
+
+    def send_request(_):
+        return client.get("/hello").status_code
+
+    with ThreadPoolExecutor(max_workers=5) as executor:
+        statuses = list(executor.map(send_request, range(5)))
+
+    assert statuses == [200] * 5
+    assert fake.max_active == 2
 
 
 def test_model_cannot_set_hop_by_hop_headers():

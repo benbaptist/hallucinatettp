@@ -10,7 +10,7 @@ cp .env.example .env
 docker compose up --build
 ```
 
-The server listens on port `8000` by default. Set `PORT` in `.env` to change both the container listener and published host port (for example, `PORT=9000` serves at `http://localhost:9000`). Check `/healthz` for health. Other requests are sent to the model. Configure `OPENAI_MODEL`, `OPENAI_BASE_URL`, and `MAX_BODY_BYTES` in `.env` as needed.
+The server listens on port `8000` by default. Set `PORT` in `.env` to change both the container listener and published host port (for example, `PORT=9000` serves at `http://localhost:9000`). Check `/healthz` for health. Other requests are sent to the model. Configure `OPENAI_MODEL`, `OPENAI_BASE_URL`, `MAX_BODY_BYTES`, and `LOG_LEVEL` in `.env` as needed. `MAX_CONCURRENT_INFERENCES` limits simultaneous model calls per server process (defaults to `4`); requests above the limit wait in a queue. Logs include a request ID, request start/finish, inference start/finish or failure, queue wait, and elapsed time.
 
 ## Run locally
 
