@@ -70,13 +70,19 @@ HOP_BY_HOP_HEADERS = {
     "connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
     "te", "trailer", "transfer-encoding", "upgrade", "content-length",
 }
+BASE_URL_HEADERS = {"host", "origin", "referer", "forwarded", "x-forwarded-host", "x-original-host"}
 
 
 def request_as_http(request: Request, body: bytes) -> str:
     target = request.url.path
     if request.url.query:
         target += "?" + request.url.query
-    headers = "\r\n".join(f"{name.decode('latin-1')}: {value.decode('latin-1')}" for name, value in request.scope["headers"])
+    include_base_url = request.url.path == "/"
+    headers = "\r\n".join(
+        f"{name.decode('latin-1')}: {value.decode('latin-1')}"
+        for name, value in request.scope["headers"]
+        if include_base_url or name.decode("latin-1").lower() not in BASE_URL_HEADERS
+    )
     body_text = "base64:" + base64.b64encode(body).decode("ascii") if body else ""
     return f"{request.method} {target} HTTP/{request.scope.get('http_version', '1.1')}\r\n{headers}\r\n\r\n{body_text}"
 

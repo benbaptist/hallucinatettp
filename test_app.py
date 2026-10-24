@@ -62,6 +62,32 @@ def test_raw_request_is_sent_and_model_response_returned(client):
     assert sent.endswith("base64:cGF5bG9hZA==")
 
 
+def test_base_url_headers_are_omitted_for_paths_but_kept_at_root(client):
+    fake = FakeClient('{"status":200,"headers":{},"body":"ok"}')
+    client.app.state.client = fake
+    headers = {
+        "Host": "hallucinatettp.benbaptist.com",
+        "Origin": "https://hallucinatettp.benbaptist.com",
+        "Referer": "https://hallucinatettp.benbaptist.com/",
+        "X-Forwarded-Host": "hallucinatettp.benbaptist.com",
+        "X-Input": "preserved",
+    }
+
+    client.get("/cnn.com", headers=headers)
+    path_request = fake.request[1]["json"]["messages"][1]["content"].lower()
+    assert "get /cnn.com http/" in path_request
+    assert "hallucinatettp.benbaptist.com" not in path_request
+    assert "x-input: preserved" in path_request
+
+    client.get("/", headers=headers)
+    root_request = fake.request[1]["json"]["messages"][1]["content"].lower()
+    assert "get / http/" in root_request
+    assert "host: hallucinatettp.benbaptist.com" in root_request
+    assert "origin: https://hallucinatettp.benbaptist.com" in root_request
+    assert "referer: https://hallucinatettp.benbaptist.com/" in root_request
+    assert "x-forwarded-host: hallucinatettp.benbaptist.com" in root_request
+
+
 def test_missing_key_returns_service_unavailable(client, monkeypatch):
     monkeypatch.setattr(server, "API_KEY", "")
     response = client.get("/hello")
