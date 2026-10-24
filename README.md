@@ -10,7 +10,7 @@ cp .env.example .env
 docker compose up --build
 ```
 
-The server listens on port `8000`. Check `http://localhost:8000/healthz` for health. Other requests are sent to the model. Configure `OPENAI_MODEL`, `OPENAI_BASE_URL`, and `MAX_BODY_BYTES` in `.env` as needed.
+The server listens on port `8000` by default. Set `PORT` in `.env` to change both the container listener and published host port (for example, `PORT=9000` serves at `http://localhost:9000`). Check `/healthz` for health. Other requests are sent to the model. Configure `OPENAI_MODEL`, `OPENAI_BASE_URL`, and `MAX_BODY_BYTES` in `.env` as needed.
 
 ## Run locally
 
@@ -19,7 +19,8 @@ python -m venv .venv
 . .venv/bin/activate
 pip install -r requirements.txt
 export OPENAI_API_KEY="your-key"
-uvicorn app:app --host 0.0.0.0 --port 8000
+export PORT=9000  # optional; defaults to 8000
+uvicorn app:app --host 0.0.0.0 --port "${PORT:-8000}"
 ```
 
 The model must return a JSON object with exactly `status` (integer), `headers` (string-to-string object), and `body` (string). The system prompt requests this format, and the server validates the response and strips unsafe framing headers. Request bodies are sent as base64 to preserve arbitrary bytes. Raw requests can contain credentials; only use this service in a trusted environment. The API key is not forwarded to the model as request data.

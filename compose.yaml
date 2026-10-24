@@ -2,8 +2,9 @@ services:
   hallucinatettp:
     build: .
     ports:
-      - "8000:8000"
+      - "${PORT:-8000}:${PORT:-8000}"
     environment:
+      PORT: ${PORT:-8000}
       OPENAI_API_KEY: ${OPENAI_API_KEY:?Set OPENAI_API_KEY in your environment}
       OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4o-mini}
       OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://api.openai.com/v1}
