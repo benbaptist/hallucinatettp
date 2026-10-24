@@ -1,6 +1,6 @@
 # HallucinateTTP
 
-A tiny HTTP server that forwards each raw incoming request to an OpenAI-compatible chat-completions API and turns the model's JSON response into an HTTP response.
+A tiny HTTP server that forwards each raw incoming request to an OpenAI-compatible chat-completions API and turns the model's response into an HTTP response. The model can return a CGI-style header block followed by a body, or unformatted text, which is served directly.
 
 ## Run with Docker Compose
 
@@ -23,4 +23,4 @@ export PORT=9000  # optional; defaults to 8000
 uvicorn app:app --host 0.0.0.0 --port "${PORT:-8000}"
 ```
 
-The model must return a JSON object with exactly `status` (integer), `headers` (string-to-string object), and `body` (string). The system prompt requests this format, and the server validates the response and strips unsafe framing headers. Request bodies are sent as base64 to preserve arbitrary bytes. Raw requests can contain credentials; only use this service in a trusted environment. The API key is not forwarded to the model as request data.
+Model output is not required to be JSON. When it returns a CGI-style header block (including a `Content-Type` or `Status` header) followed by a blank line and a body, the server uses the `Status` header (if present), forwards safe headers, and serves the remaining text as the response body. Otherwise, it serves the output as a `200` plain-text response. Hop-by-hop headers are discarded. Request bodies are sent as base64 to preserve arbitrary bytes. Raw requests can contain credentials; only use this service in a trusted environment. The API key is not forwarded to the model as request data.
