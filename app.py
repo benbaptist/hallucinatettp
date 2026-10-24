@@ -2,14 +2,13 @@ from __future__ import annotations
 
 import asyncio
 import base64
-import fcntl
 import json
 import logging
 import os
 import re
+import tempfile
 import time
 import uuid
-from functools import partial
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
 from datetime import datetime, timezone
@@ -19,9 +18,11 @@ import httpx
 from fastapi import FastAPI, Request
 from fastapi.responses import Response
 
-HTTP_ARCHIVE_PATH = Path(os.getenv("HTTP_ARCHIVE_PATH", "http-archive/http-archive.jsonl"))
+HTTP_ARCHIVE_DIR = Path(os.getenv("HTTP_ARCHIVE_DIR", "http-archive"))
 
 ARCHIVE_REQUEST_ID: ContextVar[str | None] = ContextVar("archive_request_id", default=None)
+ARCHIVE_RECORDS: ContextVar[list | None] = ContextVar("archive_records", default=None)
+ARCHIVE_DIRECTION_ORDER = {"incoming_request": 0, "upstream_request": 1, "upstream_response": 2, "outgoing_response": 3}
 API_URL = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1").rstrip("/") + "/chat/completions"
 MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 API_KEY = os.getenv("OPENAI_API_KEY", "")
@@ -59,21 +60,36 @@ TASK — produce a complete HTTP response in exactly this shape:
 def archive_http_message(request_id: str, direction: str, **fields) -> None:
     record = {
         "timestamp": datetime.now(timezone.utc).isoformat(),
-        "request_id": request_id,
         "direction": direction,
         **fields,
     }
-    encoded = (json.dumps(record, ensure_ascii=True, separators=(",", ":")) + "\n").encode("utf-8")
-    HTTP_ARCHIVE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    descriptor = os.open(HTTP_ARCHIVE_PATH, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+    records = ARCHIVE_RECORDS.get()
+    if records is None:
+        return
+    records.append(record)
+
+
+def write_archive_file(request_id: str, records: list) -> None:
+    records.sort(key=lambda record: ARCHIVE_DIRECTION_ORDER.get(record["direction"], 99))
+    payload = json.dumps({"request_id": request_id, "messages": records}, ensure_ascii=True, indent=2)
+    HTTP_ARCHIVE_DIR.mkdir(parents=True, exist_ok=True)
+    destination = HTTP_ARCHIVE_DIR / f"{request_id}.json"
+    descriptor, temporary_path = tempfile.mkstemp(dir=HTTP_ARCHIVE_DIR, prefix=f".{request_id}.", suffix=".tmp")
+    closed = False
     try:
-        os.chmod(HTTP_ARCHIVE_PATH, 0o600)
-        fcntl.flock(descriptor, fcntl.LOCK_EX)
-        os.write(descriptor, encoded)
+        os.write(descriptor, (payload + "\n").encode("utf-8"))
         os.fsync(descriptor)
-    finally:
-        fcntl.flock(descriptor, fcntl.LOCK_UN)
         os.close(descriptor)
+        closed = True
+        os.chmod(temporary_path, 0o600)
+        os.replace(temporary_path, destination)
+    finally:
+        if not closed:
+            os.close(descriptor)
+        try:
+            os.unlink(temporary_path)
+        except FileNotFoundError:
+            pass
 
 
 def headers_as_pairs(headers) -> list[list[str]]:
@@ -95,6 +111,7 @@ class HTTPArchiveMiddleware:
         request_id = scope.get("state", {}).get("request_id") or ARCHIVE_REQUEST_ID.get() or uuid.uuid4().hex[:12]
         scope.setdefault("state", {})["request_id"] = request_id
         token = ARCHIVE_REQUEST_ID.set(request_id)
+        records_token = ARCHIVE_RECORDS.set([])
         loop = asyncio.get_running_loop()
         request_body = bytearray()
         request_complete = False
@@ -129,35 +146,34 @@ class HTTPArchiveMiddleware:
             query = scope.get("query_string", b"").decode("latin-1")
             target = raw_path + ("?" + query if query else "")
             version = scope.get("http_version", "1.1")
-            await loop.run_in_executor(
-                None,
-                partial(
-                    archive_http_message,
-                    request_id,
-                    "incoming_request",
-                    protocol=f"HTTP/{version}",
-                    method=scope["method"],
-                    target=target,
-                    scheme=scope.get("scheme"),
-                    headers=headers_as_pairs(scope.get("headers", [])),
-                    body_base64=base64.b64encode(request_body).decode("ascii"),
-                    complete=request_complete,
-                ),
+            records = ARCHIVE_RECORDS.get()
+            records.append(
+                {
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "direction": "incoming_request",
+                    "protocol": f"HTTP/{version}",
+                    "method": scope["method"],
+                    "target": target,
+                    "scheme": scope.get("scheme"),
+                    "headers": headers_as_pairs(scope.get("headers", [])),
+                    "body_base64": base64.b64encode(request_body).decode("ascii"),
+                    "complete": request_complete,
+                }
             )
             if response_status is not None:
-                await loop.run_in_executor(
-                    None,
-                    partial(
-                        archive_http_message,
-                        request_id,
-                        "outgoing_response",
-                        protocol=f"HTTP/{version}",
-                        status_code=response_status,
-                        headers=response_headers,
-                        body_base64=base64.b64encode(response_body).decode("ascii"),
-                        complete=response_complete,
-                    ),
+                records.append(
+                    {
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                        "direction": "outgoing_response",
+                        "protocol": f"HTTP/{version}",
+                        "status_code": response_status,
+                        "headers": response_headers,
+                        "body_base64": base64.b64encode(response_body).decode("ascii"),
+                        "complete": response_complete,
+                    }
                 )
+            await loop.run_in_executor(None, write_archive_file, request_id, records)
+            ARCHIVE_RECORDS.reset(records_token)
             ARCHIVE_REQUEST_ID.reset(token)
 
 

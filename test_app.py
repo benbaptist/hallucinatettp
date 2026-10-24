@@ -69,7 +69,7 @@ class FakeClient:
 @pytest.fixture
 def client(monkeypatch, tmp_path):
     monkeypatch.setattr(server, "API_KEY", "test-key")
-    monkeypatch.setattr(server, "HTTP_ARCHIVE_PATH", tmp_path / "http-archive.jsonl")
+    monkeypatch.setattr(server, "HTTP_ARCHIVE_DIR", tmp_path / "http-archive")
     with TestClient(server.app) as test_client:
         yield test_client
 
@@ -105,21 +105,28 @@ def test_http_archive_saves_incoming_outgoing_and_upstream_messages(client):
     response = client.post("/archive.test?x=1", content=b"request\x00data", headers={"X-Test": "input"})
     assert response.status_code == 200
 
-    records = [json.loads(line) for line in server.HTTP_ARCHIVE_PATH.read_text().splitlines()]
+    archive_files = list(server.HTTP_ARCHIVE_DIR.glob("*.json"))
+    assert len(archive_files) == 1
+    archive_file = archive_files[0]
+    payload = json.loads(archive_file.read_text())
+    request_id = archive_file.stem
+    assert payload["request_id"] == request_id
+    records = payload["messages"]
     assert [record["direction"] for record in records] == [
+        "incoming_request",
         "upstream_request",
         "upstream_response",
-        "incoming_request",
         "outgoing_response",
     ]
-    incoming, outgoing = records[2:]
+    incoming, upstream_request, upstream_response, outgoing = records
     assert incoming["method"] == "POST"
     assert incoming["target"] == "/archive.test?x=1"
     assert base64.b64decode(incoming["body_base64"]) == b"request\x00data"
+    assert upstream_request["url"].endswith("/chat/completions")
+    assert upstream_response["status_code"] == 200
     assert outgoing["status_code"] == 200
     assert base64.b64decode(outgoing["body_base64"]) == b"reply"
-    assert all(record["request_id"] == incoming["request_id"] for record in records)
-    assert os.stat(server.HTTP_ARCHIVE_PATH).st_mode & 0o777 == 0o600
+    assert os.stat(archive_file).st_mode & 0o777 == 0o600
 
 
 def test_path_prefix_is_host_and_headers_are_simulated(client):

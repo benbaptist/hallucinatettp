@@ -3,5 +3,4 @@ __pycache__/
 .pytest_cache/
 .env
 http-archive/
-http-archive.jsonl
 *.py[cod]
